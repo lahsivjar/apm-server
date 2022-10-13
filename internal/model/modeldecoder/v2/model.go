@@ -957,6 +957,7 @@ type transaction struct {
 }
 
 type log struct {
+	EcsLogService
 	// Timestamp holds the recorded time of the event, UTC based and formatted
 	// as microseconds since Unix epoch
 	Timestamp nullable.TimeMicrosUnix `json:"@timestamp"`
@@ -991,6 +992,16 @@ type log struct {
 	ErrorStacktrace nullable.String `json:"error.stack_trace"`
 	// FAAS holds fields related to Function as a Service events.
 	FAAS faas `json:"faas"`
+	// ProcessThreadName represents the name of the thread.
+	ProcessThreadName nullable.String `json:"process.thread.name" validate:"maxLength=1024"`
+	// Dataset identifies the source which originated the log line.
+	Dataset nullable.String `json:"dataset" validate:"maxLength=1024"`
+	// Labels are a flat mapping of user-defined key-value pairs.
+	Labels mapstr.M `json:"labels" validate:"inputTypesVals=string;bool;number,maxLengthVals=1024"`
+}
+
+type EcsLogService struct {
+	NestedStruct map[string]interface{} `json:"service" flattenSource:"true"`
 	// ServiceName represents name of the service which originated the log line.
 	ServiceName nullable.String `json:"service.name" validate:"maxLength=1024"`
 	// ServiceVersion represents the version of the service which originated the log
@@ -1002,12 +1013,6 @@ type log struct {
 	// ServiceNodeName represents a unique node name per host for the service which
 	// originated the log line.
 	ServiceNodeName nullable.String `json:"service.node.name" validate:"maxLength=1024"`
-	// ProcessThreadName represents the name of the thread.
-	ProcessThreadName nullable.String `json:"process.thread.name" validate:"maxLength=1024"`
-	// Dataset identifies the source which originated the log line.
-	Dataset nullable.String `json:"dataset" validate:"maxLength=1024"`
-	// Labels are a flat mapping of user-defined key-value pairs.
-	Labels mapstr.M `json:"labels" validate:"inputTypesVals=string;bool;number,maxLengthVals=1024"`
 }
 
 type otel struct {

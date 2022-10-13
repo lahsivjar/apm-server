@@ -104,13 +104,40 @@ func TestDecodeNestedLog(t *testing.T) {
 			assert.Equal(t, model.Labels{"k": model.LabelValue{Value: "v"}}, batch[0].Labels)
 		})
 
-		t.Run("malformed", func(t *testing.T) {
+		t.Run("withNestedJSON", func(t *testing.T) {
 			input := modeldecoder.Input{}
+			str := `{"log":{"@timestamp":1662616971000000,"trace.id":"trace-id","transaction.id":"transaction-id","log.level":"error","log.logger":"testLogger","log.origin.file.name":"testFile","log.origin.file.line":10,"log.origin.function":"testFunc","service": {"name": "testsvc", "version": "v1.2.0", "environment": "prod"}, "service.node.name":"testNode","process.thread.name":"testThread","dataset":"accesslog","labels":{"k":"v"}, "error.type": "illegal-argument", "error.message": "illegal argument received", "error.stack_trace": "stack_trace_as_string"}}`
+			dec := decoder.NewJSONDecoder(strings.NewReader(str))
 			var batch model.Batch
-			err := DecodeNestedLog(decoder.NewJSONDecoder(strings.NewReader(`malformed`)), &input, &batch)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "decode")
+			require.NoError(t, DecodeNestedLog(dec, &input, &batch))
+			require.Len(t, batch, 1)
+			assert.Equal(t, "2022-09-08 06:02:51 +0000 UTC", batch[0].Timestamp.String())
+			assert.Equal(t, "trace-id", batch[0].Trace.ID)
+			assert.Equal(t, "transaction-id", batch[0].Transaction.ID)
+			assert.Equal(t, "error", batch[0].Log.Level)
+			assert.Equal(t, "testLogger", batch[0].Log.Logger)
+			assert.Equal(t, "testFile", batch[0].Log.Origin.LogFile.Name)
+			assert.Equal(t, 10, batch[0].Log.Origin.LogFile.Line)
+			assert.Equal(t, "testFunc", batch[0].Log.Origin.FunctionName)
+			assert.Equal(t, "testsvc", batch[0].Service.Name)
+			assert.Equal(t, "v1.2.0", batch[0].Service.Version)
+			assert.Equal(t, "prod", batch[0].Service.Environment)
+			assert.Equal(t, "testNode", batch[0].Service.Node.Name)
+			assert.Equal(t, "testThread", batch[0].Process.Thread.Name)
+			assert.Equal(t, "accesslog", batch[0].Event.Dataset)
+			assert.Equal(t, "illegal-argument", batch[0].Error.Type)
+			assert.Equal(t, "illegal argument received", batch[0].Error.Message)
+			assert.Equal(t, "stack_trace_as_string", batch[0].Error.StackTrace)
+			assert.Equal(t, model.Labels{"k": model.LabelValue{Value: "v"}}, batch[0].Labels)
 		})
+	})
+
+	t.Run("malformed", func(t *testing.T) {
+		input := modeldecoder.Input{}
+		var batch model.Batch
+		err := DecodeNestedLog(decoder.NewJSONDecoder(strings.NewReader(`malformed`)), &input, &batch)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "decode")
 	})
 
 	t.Run("validate", func(t *testing.T) {

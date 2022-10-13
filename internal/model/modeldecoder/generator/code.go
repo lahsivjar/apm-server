@@ -126,6 +126,9 @@ func (g *CodeGenerator) generate(st structType, key string) error {
 	if err := g.generateValidation(st, key); err != nil {
 		return err
 	}
+	if err := g.generatePreprocessor(st, key); err != nil {
+		return err
+	}
 	if key != "" {
 		key += "."
 	}
@@ -245,6 +248,52 @@ val.%s.Reset()
 		}
 	}
 	fmt.Fprint(&g.buf, `
+}
+`[1:])
+	return nil
+}
+
+func (g *CodeGenerator) generatePreprocessor(structTyp structType, key string) error {
+	fmt.Fprintf(&g.buf, `
+func (val *%s) preprocess() error {
+`, structTyp.name)
+	var foundFlattenSource bool
+	var flattenSourceField structField
+	for i := 0; i < len(structTyp.fields); i++ {
+		f := structTyp.fields[i]
+		foundFlattenSource = f.tag.Get("flattenSource") == "true"
+		if foundFlattenSource && f.Type().String() != "map[string]interface{}" {
+			return errors.New("invalid flatten source specified, should always be map[string]interface{}")
+		}
+		if foundFlattenSource {
+			flattenSourceField = f
+			break
+		}
+	}
+	for i := 0; i < len(structTyp.fields); i++ {
+		f := structTyp.fields[i]
+		if foundFlattenSource {
+			if f.Name() == flattenSourceField.Name() {
+				continue
+			}
+			if err := generateFlattenAndMergeCode(&g.buf, f, flattenSourceField); err != nil {
+				return err
+			}
+		}
+		switch f.Type().Underlying().(type) {
+		case *types.Struct:
+			if _, isCustom := g.customStruct(f.Type()); isCustom {
+				fmt.Fprintf(&g.buf, `
+if err := val.%s.preprocess(); err != nil {
+	return errors.Wrapf(err, "%s")
+}
+				`[1:], f.Name(), jsonName(f))
+			}
+
+		}
+	}
+	fmt.Fprint(&g.buf, `
+	return nil
 }
 `[1:])
 	return nil
