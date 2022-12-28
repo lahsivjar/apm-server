@@ -278,18 +278,27 @@ func TestAggregatorOverflow(t *testing.T) {
 	require.NoError(t, agg.ProcessBatch(context.Background(), &batch))
 	require.NoError(t, agg.Stop(context.Background()))
 	metricsets := batchMetricsets(t, expectBatch(t, batches))
-	require.Len(t, metricsets, maxGrps+1) // only one `other` metric should overflow
-	var overflowEvent *model.APMEvent
+	// 2 metric entry will overflow, one with the aggregated transaction
+	// and other with the overflow metric.
+	require.Len(t, metricsets, maxGrps+2)
+	var overflowEvent, overflowMetric *model.APMEvent
 	for i := range metricsets {
 		m := metricsets[i]
 		if m.Service.Name == "other" {
-			if overflowEvent != nil {
-				require.Fail(t, "only one service should overflow")
+			if len(m.Metricset.Samples) > 0 {
+				if overflowMetric != nil {
+					require.Fail(t, "only one overflow metric should be published")
+				}
+				overflowMetric = &m
+			} else {
+				if overflowEvent != nil {
+					require.Fail(t, "only one service should overflow")
+				}
+				overflowEvent = &m
 			}
-			overflowEvent = &m
 		}
 	}
-	out := cmp.Diff(model.APMEvent{
+	assert.Empty(t, cmp.Diff(model.APMEvent{
 		Service: model.Service{
 			Name: "other",
 		},
@@ -313,6 +322,15 @@ func TestAggregatorOverflow(t *testing.T) {
 		Metricset: &model.Metricset{
 			Name:     "service",
 			DocCount: int64(overflowCount),
+		},
+	}, *overflowEvent, cmpopts.IgnoreTypes(netip.Addr{})))
+	assert.Empty(t, cmp.Diff(model.APMEvent{
+		Service: model.Service{
+			Name: "other",
+		},
+		Processor: model.MetricsetProcessor,
+		Metricset: &model.Metricset{
+			Name: "service",
 			Samples: []model.MetricsetSample{
 				{
 					Name:  "service.aggregation.overflow_count",
@@ -320,8 +338,7 @@ func TestAggregatorOverflow(t *testing.T) {
 				},
 			},
 		},
-	}, *overflowEvent, cmpopts.IgnoreTypes(netip.Addr{}))
-	assert.Empty(t, out)
+	}, *overflowMetric, cmpopts.IgnoreTypes(netip.Addr{}, time.Time{})))
 }
 
 func makeTransaction(

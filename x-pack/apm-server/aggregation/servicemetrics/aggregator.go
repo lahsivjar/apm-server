@@ -183,25 +183,37 @@ func (a *Aggregator) publish(ctx context.Context) error {
 	}
 
 	batch := make(model.Batch, 0, size)
+	prepareMetrics := func(entry *metricsMapEntry) {
+		totalCount, counts, values := entry.serviceMetrics.histogramBuckets()
+		m := makeMetricset(entry.aggregationKey, entry.serviceMetrics, totalCount, counts, values)
+		batch = append(batch, m)
+		entry.histogram.Reset()
+	}
 	for key, metrics := range a.inactive.m {
 		for _, entry := range metrics {
-			totalCount, counts, values := entry.serviceMetrics.histogramBuckets()
-			m := makeMetricset(entry.aggregationKey, entry.serviceMetrics, totalCount, counts, values)
-			batch = append(batch, m)
-			entry.histogram.Reset()
+			prepareMetrics(entry)
 		}
 		delete(a.inactive.m, key)
 	}
 	if a.inactive.other != nil {
 		entry := a.inactive.other
-		totalCount, counts, values := entry.serviceMetrics.histogramBuckets()
-		m := makeMetricset(entry.aggregationKey, entry.serviceMetrics, totalCount, counts, values)
-		m.Metricset.Samples = append(m.Metricset.Samples, model.MetricsetSample{
-			Name:  "service.aggregation.overflow_count",
-			Value: float64(a.inactive.otherCardinalityEstimator.Estimate()),
+		prepareMetrics(entry)
+		batch = append(batch, model.APMEvent{
+			Timestamp: time.Now(),
+			Processor: model.MetricsetProcessor,
+			Service: model.Service{
+				Name: entry.serviceName,
+			},
+			Metricset: &model.Metricset{
+				Name: metricsetName,
+				Samples: []model.MetricsetSample{
+					{
+						Name:  "service.aggregation.overflow_count",
+						Value: float64(a.inactive.otherCardinalityEstimator.Estimate()),
+					},
+				},
+			},
 		})
-		batch = append(batch, m)
-		entry.histogram.Reset()
 		a.inactive.other = nil
 		a.inactive.otherCardinalityEstimator = nil
 	}

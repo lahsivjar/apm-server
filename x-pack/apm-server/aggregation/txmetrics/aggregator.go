@@ -237,26 +237,40 @@ func (a *Aggregator) publish(ctx context.Context) error {
 	// the specific time period (date_range) on the metrics documents.
 
 	batch := make(model.Batch, 0, a.inactive.entries)
+	prepareMetrics := func(entry *metricsMapEntry) {
+		totalCount, counts, values := entry.transactionMetrics.histogramBuckets()
+		batch = append(batch, makeMetricset(entry.transactionAggregationKey, totalCount, counts, values))
+		entry.histogram.Reset()
+	}
 	for svc, svcEntry := range a.inactive.m {
 		for hash, entries := range svcEntry.m {
 			for _, entry := range entries {
-				totalCount, counts, values := entry.transactionMetrics.histogramBuckets()
-				batch = append(batch, makeMetricset(entry.transactionAggregationKey, totalCount, counts, values))
-				entry.histogram.Reset()
+				prepareMetrics(entry)
 			}
 			delete(svcEntry.m, hash)
 		}
 		if svcEntry.other != nil {
 			entry := svcEntry.other
-			totalCount, counts, values := entry.transactionMetrics.histogramBuckets()
-			m := makeMetricset(entry.transactionAggregationKey, totalCount, counts, values)
-			m.Metricset.Samples = append(m.Metricset.Samples, model.MetricsetSample{
-				Name:  "transaction.aggregation.overflow_count",
-				Value: float64(svcEntry.otherCardinalityEstimator.Estimate()),
+			prepareMetrics(entry)
+			batch = append(batch, model.APMEvent{
+				Timestamp: time.Now(),
+				Processor: model.MetricsetProcessor,
+				Service: model.Service{
+					Name: entry.serviceName,
+				},
+				Transaction: &model.Transaction{
+					Name: entry.transactionName,
+				},
+				Metricset: &model.Metricset{
+					Name: metricsetName,
+					Samples: []model.MetricsetSample{
+						{
+							Name:  "transaction.aggregation.overflow_count",
+							Value: float64(svcEntry.otherCardinalityEstimator.Estimate()),
+						},
+					},
+				},
 			})
-			batch = append(batch, m)
-
-			entry.histogram.Reset()
 			svcEntry.other = nil
 			svcEntry.otherCardinalityEstimator = nil
 			svcEntry.entries = 0
@@ -265,7 +279,6 @@ func (a *Aggregator) publish(ctx context.Context) error {
 	}
 	a.inactive.entries = 0
 	a.inactive.services = 0
-
 	a.config.Logger.Debugf("publishing %d metricsets", len(batch))
 	return a.config.BatchProcessor.ProcessBatch(ctx, &batch)
 }
