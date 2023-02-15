@@ -11,6 +11,7 @@ import (
 
 	"github.com/pkg/errors"
 
+	mtutil "github.com/elastic/apm-server/internal/multitenant/util"
 	"github.com/elastic/elastic-agent-libs/logp"
 )
 
@@ -19,6 +20,9 @@ type PublishFunc func(context.Context, time.Duration) error
 
 // AggregatorConfig defined the common aggregator configuration.
 type AggregatorConfig struct {
+	// ProjectID refers to the projectID that is running the current aggregator.
+	ProjectID string
+
 	// PublishFunc is the function that performs the actual publishing
 	// of aggregated events.
 	PublishFunc PublishFunc
@@ -91,6 +95,7 @@ func New(cfg AggregatorConfig) (*Aggregator, error) {
 // metrics. Run returns when either a fatal error occurs, or the Aggregator's
 // Stop method is invoked.
 func (a *Aggregator) Run() error {
+	ctx := mtutil.SetProjectIDInContext(context.Background(), a.config.ProjectID)
 	ticker := time.NewTicker(a.config.Interval)
 	defer ticker.Stop()
 	defer func() {
@@ -119,7 +124,7 @@ func (a *Aggregator) Run() error {
 			if !stop && (ticks*uint64(a.config.Interval))%uint64(interval) != 0 {
 				continue
 			}
-			if err := a.publish(context.Background(), interval); err != nil {
+			if err := a.publish(ctx, interval); err != nil {
 				a.config.Logger.With(logp.Error(err)).Warnf(
 					"publishing of %s metrics failed: %s",
 					interval.String(), err,

@@ -30,6 +30,9 @@ const (
 
 // AggregatorConfig holds configuration for creating an Aggregator.
 type AggregatorConfig struct {
+	// ProjectID refers to the projectID that is running the current aggregator.
+	ProjectID string
+
 	// BatchProcessor is a model.BatchProcessor for asynchronously
 	// processing metrics documents.
 	BatchProcessor model.BatchProcessor
@@ -100,6 +103,7 @@ func NewAggregator(config AggregatorConfig) (*Aggregator, error) {
 		inactive: make(map[time.Duration]*metricsBuffer),
 	}
 	base, err := baseaggregator.New(baseaggregator.AggregatorConfig{
+		ProjectID:       config.ProjectID,
 		PublishFunc:     aggregator.publish, // inject local publish
 		Logger:          config.Logger,
 		Interval:        config.Interval,

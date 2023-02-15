@@ -27,12 +27,10 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/dustin/go-humanize"
 	"github.com/hashicorp/go-multierror"
 	"github.com/pkg/errors"
 	"go.elastic.co/apm/module/apmgrpc/v2"
 	"go.elastic.co/apm/v2"
-	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 
@@ -47,7 +45,6 @@ import (
 	agentconfig "github.com/elastic/elastic-agent-libs/config"
 	"github.com/elastic/elastic-agent-libs/logp"
 	"github.com/elastic/elastic-agent-libs/monitoring"
-	"github.com/elastic/go-docappender"
 	"github.com/elastic/go-ucfg"
 
 	"github.com/elastic/apm-data/model"
@@ -61,6 +58,7 @@ import (
 	"github.com/elastic/apm-server/internal/idxmgmt"
 	"github.com/elastic/apm-server/internal/kibana"
 	"github.com/elastic/apm-server/internal/model/modelprocessor"
+	"github.com/elastic/apm-server/internal/multitenant"
 	"github.com/elastic/apm-server/internal/publish"
 	"github.com/elastic/apm-server/internal/sourcemap"
 	"github.com/elastic/apm-server/internal/version"
@@ -73,10 +71,11 @@ type Runner struct {
 	logger     *logp.Logger
 	rawConfig  *agentconfig.C
 
-	config                    *config.Config
-	fleetConfig               *config.Fleet
-	outputConfig              agentconfig.Namespace
-	elasticsearchOutputConfig *agentconfig.C
+	config                      *config.Config
+	fleetConfig                 *config.Fleet
+	outputConfig                agentconfig.Namespace
+	elasticsearchOutputConfig   *agentconfig.C
+	mtElasticsearchOutputConfig map[string]*agentconfig.C
 
 	listener net.Listener
 }
@@ -106,6 +105,7 @@ func NewRunner(args RunnerParams) (*Runner, error) {
 		DataStream struct {
 			Namespace string `config:"namespace"`
 		} `config:"data_stream"`
+		TenantOutput map[string]agentconfig.Namespace `config:"mtoutput"`
 	}
 	if err := args.Config.Unpack(&unpackedConfig); err != nil {
 		return nil, err
@@ -114,6 +114,10 @@ func NewRunner(args RunnerParams) (*Runner, error) {
 	var elasticsearchOutputConfig *agentconfig.C
 	if unpackedConfig.Output.Name() == "elasticsearch" {
 		elasticsearchOutputConfig = unpackedConfig.Output.Config()
+	}
+	mtESCfg := make(map[string]*agentconfig.C)
+	for k, v := range unpackedConfig.TenantOutput {
+		mtESCfg[k] = v.Config()
 	}
 	cfg, err := config.NewConfig(unpackedConfig.APMServer, elasticsearchOutputConfig)
 	if err != nil {
@@ -135,10 +139,11 @@ func NewRunner(args RunnerParams) (*Runner, error) {
 		logger:     logger,
 		rawConfig:  args.Config,
 
-		config:                    cfg,
-		fleetConfig:               unpackedConfig.Fleet,
-		outputConfig:              unpackedConfig.Output,
-		elasticsearchOutputConfig: elasticsearchOutputConfig,
+		config:                      cfg,
+		fleetConfig:                 unpackedConfig.Fleet,
+		outputConfig:                unpackedConfig.Output,
+		elasticsearchOutputConfig:   elasticsearchOutputConfig,
+		mtElasticsearchOutputConfig: mtESCfg,
 
 		listener: listener,
 	}, nil
@@ -633,51 +638,8 @@ func (s *Runner) newFinalBatchProcessor(
 	}
 	monitoring.NewString(outputRegistry, "name").Set("elasticsearch")
 
-	var esConfig struct {
-		*elasticsearch.Config `config:",inline"`
-		FlushBytes            string        `config:"flush_bytes"`
-		FlushInterval         time.Duration `config:"flush_interval"`
-		MaxRequests           int           `config:"max_requests"`
-		Scaling               struct {
-			Enabled *bool `config:"enabled"`
-		} `config:"autoscaling"`
-	}
-	esConfig.FlushInterval = time.Second
-	esConfig.Config = elasticsearch.DefaultConfig()
-	if err := s.elasticsearchOutputConfig.Unpack(&esConfig); err != nil {
-		return nil, nil, err
-	}
-
-	var flushBytes int
-	if esConfig.FlushBytes != "" {
-		b, err := humanize.ParseBytes(esConfig.FlushBytes)
-		if err != nil {
-			return nil, nil, errors.Wrap(err, "failed to parse flush_bytes")
-		}
-		flushBytes = int(b)
-	}
-	client, err := newElasticsearchClient(esConfig.Config)
-	if err != nil {
-		return nil, nil, err
-	}
-	var scalingCfg docappender.ScalingConfig
-	if enabled := esConfig.Scaling.Enabled; enabled != nil {
-		scalingCfg.Disabled = !*enabled
-	}
-	opts := docappender.Config{
-		CompressionLevel: esConfig.CompressionLevel,
-		FlushBytes:       flushBytes,
-		FlushInterval:    esConfig.FlushInterval,
-		Tracer:           tracer,
-		MaxRequests:      esConfig.MaxRequests,
-		Scaling:          scalingCfg,
-		Logger:           zap.New(s.logger.Core(), zap.WithCaller(true)),
-	}
-	opts = docappenderConfig(opts, memLimit, s.logger)
-	appender, err := docappender.New(client, opts)
-	if err != nil {
-		return nil, nil, err
-	}
+	mtAppender := multitenant.NewDocappender(
+		s.getESConfig, newElasticsearchClient, memLimit, s.logger)
 
 	// Install our own libbeat-compatible metrics callback which uses the docappender stats.
 	// All the metrics below are required to be reported to be able to display all relevant
@@ -686,14 +648,14 @@ func (s *Runner) newFinalBatchProcessor(
 		v.OnRegistryStart()
 		defer v.OnRegistryFinished()
 		v.OnKey("bytes")
-		v.OnInt(appender.Stats().BytesTotal)
+		v.OnInt(mtAppender.Stats().BytesTotal)
 	})
 	outputType := monitoring.NewString(libbeatMonitoringRegistry.GetRegistry("output"), "type")
 	outputType.Set("elasticsearch")
 	monitoring.NewFunc(libbeatMonitoringRegistry, "output.events", func(_ monitoring.Mode, v monitoring.Visitor) {
 		v.OnRegistryStart()
 		defer v.OnRegistryFinished()
-		stats := appender.Stats()
+		stats := mtAppender.Stats()
 		v.OnKey("acked")
 		v.OnInt(stats.Indexed)
 		v.OnKey("active")
@@ -711,13 +673,13 @@ func (s *Runner) newFinalBatchProcessor(
 		v.OnRegistryStart()
 		defer v.OnRegistryFinished()
 		v.OnKey("total")
-		v.OnInt(appender.Stats().Added)
+		v.OnInt(mtAppender.Stats().Added)
 	})
 	monitoring.Default.Remove("output")
 	monitoring.NewFunc(monitoring.Default, "output.elasticsearch.bulk_requests", func(_ monitoring.Mode, v monitoring.Visitor) {
 		v.OnRegistryStart()
 		defer v.OnRegistryFinished()
-		stats := appender.Stats()
+		stats := mtAppender.Stats()
 		v.OnKey("available")
 		v.OnInt(stats.AvailableBulkRequests)
 		v.OnKey("completed")
@@ -726,7 +688,7 @@ func (s *Runner) newFinalBatchProcessor(
 	monitoring.NewFunc(monitoring.Default, "output.elasticsearch.indexers", func(_ monitoring.Mode, v monitoring.Visitor) {
 		v.OnRegistryStart()
 		defer v.OnRegistryFinished()
-		stats := appender.Stats()
+		stats := mtAppender.Stats()
 		v.OnKey("active")
 		v.OnInt(stats.IndexersActive)
 		v.OnKey("created")
@@ -734,36 +696,21 @@ func (s *Runner) newFinalBatchProcessor(
 		v.OnKey("destroyed")
 		v.OnInt(stats.IndexersDestroyed)
 	})
-	return newDocappenderBatchProcessor(appender), appender.Close, nil
+	return newDocappenderBatchProcessor(mtAppender), mtAppender.Close, nil
 }
 
-func docappenderConfig(
-	opts docappender.Config, memLimit float64, logger *logp.Logger,
-) docappender.Config {
-	const logMessage = "%s set to %d based on %0.1fgb of memory"
-	// Use 80% of the total memory limit to calculate buffer size
-	opts.DocumentBufferSize = int(1024 * memLimit * 0.8)
-	if opts.DocumentBufferSize >= 61440 {
-		opts.DocumentBufferSize = 61440
+func (s *Runner) getESConfig(projectID string) (*multitenant.DocappenderESConfig, error) {
+	var cfg multitenant.DocappenderESConfig
+	cfg.FlushInterval = time.Second
+	cfg.Config = elasticsearch.DefaultConfig()
+	projectESCfg, ok := s.mtElasticsearchOutputConfig[projectID]
+	if !ok {
+		return nil, fmt.Errorf("configuration for project %s not present", projectID)
 	}
-	logger.Infof(logMessage,
-		"docappender.DocumentBufferSize", opts.DocumentBufferSize, memLimit,
-	)
-	if opts.MaxRequests > 0 {
-		return opts
+	if err := projectESCfg.Unpack(&cfg); err != nil {
+		return nil, err
 	}
-	// This formula yields the following max requests for APM Server sized:
-	// 1	2 	4	8	15	30
-	// 10	12	14	19	28	46
-	maxRequests := int(float64(10) + memLimit*1.5)
-	if maxRequests > 60 {
-		maxRequests = 60
-	}
-	opts.MaxRequests = maxRequests
-	logger.Infof(logMessage,
-		"docappender.MaxRequests", opts.MaxRequests, memLimit,
-	)
-	return opts
+	return &cfg, nil
 }
 
 func (s *Runner) newLibbeatFinalBatchProcessor(

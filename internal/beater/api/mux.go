@@ -259,6 +259,7 @@ func agentConfigHandler(
 
 func apmMiddleware(m map[request.ResultID]*monitoring.Int) []middleware.Middleware {
 	return []middleware.Middleware{
+		middleware.ProjectIDMiddleware(),
 		middleware.LogMiddleware(),
 		middleware.TimeoutMiddleware(),
 		middleware.RecoverPanicMiddleware(),

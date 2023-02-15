@@ -30,8 +30,8 @@ import (
 	"github.com/elastic/apm-data/model"
 	"github.com/elastic/apm-server/internal/beater/auth"
 	"github.com/elastic/apm-server/internal/beater/ratelimit"
+	"github.com/elastic/apm-server/internal/multitenant"
 	"github.com/elastic/apm-server/internal/version"
-	"github.com/elastic/go-docappender"
 )
 
 const (
@@ -81,12 +81,16 @@ func newObserverBatchProcessor() model.ProcessBatchFunc {
 	}
 }
 
-func newDocappenderBatchProcessor(a *docappender.Appender) model.ProcessBatchFunc {
+func newDocappenderBatchProcessor(mta *multitenant.MTAppender) model.ProcessBatchFunc {
 	var pool sync.Pool
 	pool.New = func() any {
 		return &pooledReader{pool: &pool}
 	}
 	return func(ctx context.Context, b *model.Batch) error {
+		a, err := mta.GetWithContext(ctx)
+		if err != nil {
+			return err
+		}
 		for _, event := range *b {
 			r := pool.Get().(*pooledReader)
 			if err := event.MarshalFastJSON(&r.jsonw); err != nil {
