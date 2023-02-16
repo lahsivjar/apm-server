@@ -6,7 +6,7 @@ metadata:
   labels:
     app: apmserver
 spec:
-  replicas: 1
+  replicas: 2
   strategy:
     type: "RollingUpdate"
   selector:
@@ -34,7 +34,7 @@ spec:
             cpu: 1
             memory: "1Gi"
           requests:
-            cpu: 1
+            cpu: 0.5
             memory: "1Gi"
         volumeMounts:
         - name: mt-apm-server-conf
@@ -104,5 +104,15 @@ data:
       password: "changeme"
     logging.level: warning
     http.enabled: false
-
-
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mt-apm-server
+spec:
+  selector:
+    app: apmserver
+  ports:
+    - protocol: TCP
+      port: 8200
+      targetPort: 8200

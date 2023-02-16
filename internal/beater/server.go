@@ -44,6 +44,7 @@ import (
 	"github.com/elastic/apm-server/internal/kibana"
 	"github.com/elastic/apm-server/internal/model/modelprocessor"
 	"github.com/elastic/apm-server/internal/sourcemap"
+	"github.com/weaveworks/common/httpgrpc"
 )
 
 var (
@@ -195,6 +196,7 @@ func newServer(args ServerParams, listener net.Listener) (server, error) {
 	zapLogger := zap.New(args.Logger.Core(), zap.WithCaller(true))
 	otlp.RegisterGRPCServices(args.GRPCServer, zapLogger, otlpBatchProcessor)
 	jaeger.RegisterGRPCServices(args.GRPCServer, zapLogger, args.BatchProcessor, args.AgentConfig)
+	httpgrpc.RegisterHTTPServer(args.GRPCServer, httpServer)
 
 	return server{
 		logger:     args.Logger,

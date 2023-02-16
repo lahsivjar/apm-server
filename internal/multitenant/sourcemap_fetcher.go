@@ -19,7 +19,6 @@ package multitenant
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/elastic/apm-server/internal/multitenant/util"
@@ -73,6 +72,5 @@ func (sf *SourcemapFetcher) Fetch(ctx context.Context, name, version, bundleFile
 	sf.a[projectID] = fetcher
 	sf.mu.Unlock()
 
-	fmt.Println("YAYYYYYYYYYY", projectID)
 	return fetcher.Fetch(ctx, name, version, bundleFilePath)
 }

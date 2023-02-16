@@ -18,14 +18,18 @@
 package beater
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 
 	"github.com/libp2p/go-reuseport"
+	"github.com/weaveworks/common/httpgrpc"
 	"go.uber.org/zap"
 	"golang.org/x/net/netutil"
 
@@ -114,6 +118,41 @@ func (h *httpServer) stop() {
 			h.logger.Errorf("error closing http server: %s", err.Error())
 		}
 	}
+}
+
+func (h *httpServer) Handle(ctx context.Context, r *httpgrpc.HTTPRequest) (*httpgrpc.HTTPResponse, error) {
+	req, err := http.NewRequest(r.Method, r.Url, io.NopCloser(bytes.NewBuffer(r.Body)))
+	if err != nil {
+		return nil, err
+	}
+
+	for _, h := range r.Headers {
+		req.Header[h.Key] = h.Values
+	}
+	req = req.WithContext(ctx)
+	req.RequestURI = r.Url
+	req.ContentLength = int64(len(r.Body))
+
+	recorder := httptest.NewRecorder()
+	h.Handler.ServeHTTP(recorder, req)
+
+	httpRespHeaders := recorder.Header()
+	grpcRespHeaders := make([]*httpgrpc.Header, 0, len(httpRespHeaders))
+	for k, vs := range httpRespHeaders {
+		grpcRespHeaders = append(grpcRespHeaders, &httpgrpc.Header{
+			Key:    k,
+			Values: vs,
+		})
+	}
+	resp := &httpgrpc.HTTPResponse{
+		Code:    int32(recorder.Code),
+		Headers: grpcRespHeaders,
+		Body:    recorder.Body.Bytes(),
+	}
+	if recorder.Code/100 == 5 {
+		return nil, httpgrpc.ErrorFromHTTPResponse(resp)
+	}
+	return resp, nil
 }
 
 // listen starts the listener for bt.config.Host.
