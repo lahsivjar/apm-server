@@ -50,11 +50,13 @@ type RumConfig struct {
 
 // SourceMapping holds sourcemap config information
 type SourceMapping struct {
-	Enabled      bool                  `config:"enabled"`
-	ESConfig     *elasticsearch.Config `config:"elasticsearch"`
-	Timeout      time.Duration         `config:"timeout" validate:"positive"`
-	esConfigured bool
-	es           *config.C
+	Enabled  bool                  `config:"enabled"`
+	ESConfig *elasticsearch.Config `config:"elasticsearch"`
+	// TODO: temporary separate config for multitenant to avoid conflicts
+	MultiteantFetcherConfig map[string]*elasticsearch.Config `config:"mtelasticsearch"`
+	Timeout                 time.Duration                    `config:"timeout" validate:"positive"`
+	esConfigured            bool
+	es                      *config.C
 }
 
 func (c *RumConfig) setup(log *logp.Logger, outputESCfg *config.C) error {

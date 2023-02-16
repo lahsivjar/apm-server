@@ -105,7 +105,8 @@ func NewRunner(args RunnerParams) (*Runner, error) {
 		DataStream struct {
 			Namespace string `config:"namespace"`
 		} `config:"data_stream"`
-		TenantOutput map[string]agentconfig.Namespace `config:"mtoutput"`
+		// TODO: temporary for now to not conflict with normal output
+		MultitenantOutput map[string]agentconfig.Namespace `config:"mtoutput"`
 	}
 	if err := args.Config.Unpack(&unpackedConfig); err != nil {
 		return nil, err
@@ -116,7 +117,7 @@ func NewRunner(args RunnerParams) (*Runner, error) {
 		elasticsearchOutputConfig = unpackedConfig.Output.Config()
 	}
 	mtESCfg := make(map[string]*agentconfig.C)
-	for k, v := range unpackedConfig.TenantOutput {
+	for k, v := range unpackedConfig.MultitenantOutput {
 		mtESCfg[k] = v.Config()
 	}
 	cfg, err := config.NewConfig(unpackedConfig.APMServer, elasticsearchOutputConfig)
@@ -335,14 +336,17 @@ func (s *Runner) Run(ctx context.Context) error {
 
 	var sourcemapFetcher sourcemap.Fetcher
 	if s.config.RumConfig.Enabled && s.config.RumConfig.SourceMapping.Enabled {
-		fetcher, cancel, err := newSourcemapFetcher(
-			s.config.RumConfig.SourceMapping,
-			kibanaClient, newElasticsearchClient,
-		)
+		fetcher := multitenant.NewSourcemapFetcher(func(projectID string) (sourcemap.Fetcher, error) {
+			return newSourcemapFetcher(
+				backgroundContext,
+				projectID,
+				s.config.RumConfig.SourceMapping,
+				kibanaClient, newElasticsearchClient,
+			)
+		})
 		if err != nil {
 			return err
 		}
-		defer cancel()
 		sourcemapFetcher = fetcher
 	}
 
@@ -773,37 +777,36 @@ func (s *Runner) newLibbeatFinalBatchProcessor(
 const sourcemapIndex = ".apm-source-map"
 
 func newSourcemapFetcher(
+	ctx context.Context,
+	projectID string,
 	cfg config.SourceMapping,
 	kibanaClient *kibana.Client,
 	newElasticsearchClient func(*elasticsearch.Config) (*elasticsearch.Client, error),
-) (sourcemap.Fetcher, context.CancelFunc, error) {
-	esClient, err := newElasticsearchClient(cfg.ESConfig)
+) (sourcemap.Fetcher, error) {
+	esCfg, ok := cfg.MultiteantFetcherConfig[projectID]
+	if !ok {
+		return nil, fmt.Errorf("no fetcher elasticsearch config found for project ID: %s", projectID)
+	}
+	esClient, err := newElasticsearchClient(esCfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	var chained sourcemap.ChainedFetcher
-
-	// start background sync job
-	ctx, cancel := context.WithCancel(context.Background())
 	metadataFetcher, invalidationChan := sourcemap.NewMetadataFetcher(ctx, esClient, sourcemapIndex)
-
 	esFetcher := sourcemap.NewElasticsearchFetcher(esClient, sourcemapIndex)
 	size := 128
 	cachingFetcher, err := sourcemap.NewBodyCachingFetcher(esFetcher, size, invalidationChan)
 	if err != nil {
-		cancel()
-		return nil, nil, err
+		return nil, err
 	}
+
 	sourcemapFetcher := sourcemap.NewSourcemapFetcher(metadataFetcher, cachingFetcher)
-
 	chained = append(chained, sourcemapFetcher)
-
 	if kibanaClient != nil {
 		chained = append(chained, sourcemap.NewKibanaFetcher(kibanaClient))
 	}
-
-	return chained, cancel, nil
+	return chained, nil
 }
 
 // TODO: This is copying behavior from libbeat:

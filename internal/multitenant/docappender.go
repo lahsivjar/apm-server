@@ -31,9 +31,6 @@ import (
 	"go.uber.org/zap"
 )
 
-type mtCfgResolver func(projectID string) (*DocappenderESConfig, error)
-type mtESClientResolver func(cfg *elasticsearch.Config) (*elasticsearch.Client, error)
-
 type DocappenderESConfig struct {
 	*elasticsearch.Config `config:",inline"`
 	FlushBytes            string        `config:"flush_bytes"`
