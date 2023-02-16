@@ -7,7 +7,6 @@ spec:
   count: 1
   elasticsearchRef:
     name: elasticsearch
-    namespace: default
   http:
     tls:
       selfSignedCertificate:
@@ -36,7 +35,7 @@ spec:
   config:
     xpack.banners.placement: top
     xpack.banners.textContent: Log in credentials are `admin/changeme` by default
-    xpack.fleet.agents.elasticsearch.hosts: ["http://elasticsearch-es-http.default.svc:9200"]
+    xpack.fleet.agents.elasticsearch.hosts: ["http://elasticsearch-es-http:9200"]
     xpack.fleet.packages:
     - name: apm
       version: latest
@@ -52,7 +51,6 @@ spec:
     - name: Fleet Server on ECK policy
       id: eck-fleet-server
       is_default_fleet_server: true
-      namespace: default
       monitoring_enabled:
       - logs
       - metrics
@@ -64,7 +62,6 @@ spec:
           name: fleet_server
     - name: APM Server on ECK policy
       id: eck-apm-server
-      namespace: default
       monitoring_enabled:
       - logs
       - metrics

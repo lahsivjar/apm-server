@@ -1,0 +1,16 @@
+namespace:
+  - kind: Elasticsearch
+    path: metadata/namespace
+    create: true
+  - kind: Agent
+    path: metadata/namespace
+    create: true
+  - kind: Secret
+    path: metadata/namespace
+    create: true
+  - kind: Kibana
+    path: metadata/namespace
+    create: true
+  - kind: Kibana
+    path: spec/elasticsearchRef/namespace
+    create: true

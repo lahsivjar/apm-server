@@ -1,0 +1,34 @@
+resources:
+- https://download.elastic.co/downloads/eck/2.4.0/crds.yaml
+- https://download.elastic.co/downloads/eck/2.4.0/operator.yaml
+- trial-license.yaml
+- mt-apm-server.yaml
+- tenant1
+- tenant2
+
+patches:
+- patch: |-
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: mt-apm-server
+    spec:
+      image: mt-apm-server
+- patch: |-
+    apiVersion: apps/v1
+    kind: StatefulSet
+    metadata:
+      name: elastic-operator
+      namespace: elastic-system
+    spec:
+      selector:
+        control-plane: elastic-operator
+      template:
+        spec:
+          containers:
+            - name: manager
+              resources:
+                limits:
+                  memory: "512Mi"
+                requests:
+                  memory: "150Mi"
