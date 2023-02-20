@@ -1,10 +1,3 @@
-# Build a custom elastic-agent image with a locally built apm-server binary injected.
-custom_build(
-  'elastic-agent',
-  'bash ./testing/docker/elastic-agent/build.sh -t $EXPECTED_REF',
-  ['go.mod', 'go.sum', 'Makefile', '*.mk', '.git', 'cmd', 'internal', 'x-pack'],
-)
-
 custom_build(
   'mt-apm-server',
   'docker build -f ./packaging/docker/Dockerfile -t $EXPECTED_REF .',
@@ -43,12 +36,10 @@ k8s_resource('elastic-operator', objects=['eck-trial-license:Secret:elastic-syst
 k8s_resource('mt-apm-server', port_forwards=8200)
 
 # Resources for tenant1
-# k8s_resource('apm-server:agent:tenant1', port_forwards=8200)
 k8s_resource('kibana:kibana:tenant1', port_forwards=5601)
 k8s_resource('elasticsearch:elasticsearch:tenant1', port_forwards=9200, objects=['elasticsearch-admin:Secret:tenant1'])
 
 # Resources for tenant2
-# k8s_resource('apm-server:agent:tenant2', port_forwards=8201)
 k8s_resource('kibana:kibana:tenant2', port_forwards=5602)
 k8s_resource('elasticsearch:elasticsearch:tenant2', port_forwards=9201, objects=['elasticsearch-admin:Secret:tenant2'])
 
@@ -60,12 +51,3 @@ k8s_resource('elasticsearch:elasticsearch:tenant2', port_forwards=9201, objects=
 if config.tilt_subcommand == "down":
   print(local("kubectl delete --ignore-not-found namespace/elastic-system"))
 
-# Add a button for sending trace events and metrics to APM Server.
-load('ext://uibutton', 'cmd_button')
-cmd_button(
-  'apm-server:sendotlp',
-  argv=['sh', '-c', 'cd systemtest && %s go run ./cmd/sendotlp' % run_with_go_ver],
-  resource='apm-server',
-  icon_name='input',
-  text='Send OTLP data',
-)
