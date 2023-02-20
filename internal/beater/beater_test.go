@@ -70,9 +70,9 @@ func TestStoreUsesRUMElasticsearchConfig(t *testing.T) {
 	cfg.RumConfig.SourceMapping.ESConfig = elasticsearch.DefaultConfig()
 	cfg.RumConfig.SourceMapping.ESConfig.Hosts = []string{ts.URL}
 
-	fetcher, cancel, err := newSourcemapFetcher(
-		cfg.RumConfig.SourceMapping,
-		nil, elasticsearch.NewClient,
+	ctx, cancel := context.WithCancel(context.Background())
+	fetcher, err := newSourcemapFetcher(
+		ctx, "test", cfg.RumConfig.SourceMapping, nil, elasticsearch.NewClient,
 	)
 	require.NoError(t, err)
 	defer cancel()

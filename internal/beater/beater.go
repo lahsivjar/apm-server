@@ -700,7 +700,7 @@ func (s *Runner) newFinalBatchProcessor(
 		v.OnKey("destroyed")
 		v.OnInt(stats.IndexersDestroyed)
 	})
-	return newDocappenderBatchProcessor(mtAppender), mtAppender.Close, nil
+	return mtAppender, mtAppender.Close, nil
 }
 
 func (s *Runner) getESConfig(projectID string) (*multitenant.DocappenderESConfig, error) {

@@ -19,8 +19,12 @@ package multitenant
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
+	"github.com/elastic/apm-data/model"
+	"github.com/elastic/apm-server/internal/multitenant/util"
 	"github.com/elastic/apm-server/x-pack/apm-server/aggregation/servicesummarymetrics"
 	"github.com/elastic/apm-server/x-pack/apm-server/aggregation/servicetxmetrics"
 	"github.com/elastic/apm-server/x-pack/apm-server/aggregation/spanmetrics"
@@ -32,8 +36,7 @@ import (
 type aggregatorType interface {
 	*txmetrics.Aggregator | *servicetxmetrics.Aggregator | *spanmetrics.Aggregator | *servicesummarymetrics.Aggregator
 
-	batchType
-
+	ProcessBatch(ctx context.Context, b *model.Batch) error
 	Run() error
 	Stop(context.Context) error
 }
@@ -42,9 +45,10 @@ type aggregatorType interface {
 // All aggregators wrapped with this processor will behave as a multitenant
 // aggregator.
 type AggregatorProcessor[V aggregatorType] struct {
-	*baseProcessor[V]
-
-	stopMu sync.Mutex
+	provider     *provider[V]
+	stopMu       sync.Mutex
+	stopping     chan struct{}
+	newlyCreated chan V
 }
 
 // NewAggregator wraps an existing aggregator to allow for dynamic creation
@@ -54,12 +58,38 @@ func NewAggregator[V aggregatorType](
 	creator func(string) (V, error),
 ) *AggregatorProcessor[V] {
 	return &AggregatorProcessor[V]{
-		baseProcessor: newBaseProcessor[V](
-			creator,
-			make(chan V),
-			make(chan struct{}),
-		),
+		provider:     newProvider(creator),
+		stopping:     make(chan struct{}),
+		newlyCreated: make(chan V),
 	}
+}
+
+func (rp *AggregatorProcessor[V]) ProcessBatch(ctx context.Context, b *model.Batch) error {
+	select {
+	case <-rp.stopping:
+		return errors.New("processor is stopping")
+	default:
+	}
+
+	projectID, err := util.GetProjectIDFromContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	res, newlyCreated, err := rp.provider.get(projectID)
+	if err != nil {
+		return err
+	}
+
+	if newlyCreated {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("failed to start new aggregator for project ID: %s", projectID)
+		case rp.newlyCreated <- res:
+		}
+	}
+
+	return res.ProcessBatch(ctx, b)
 }
 
 // Run runs all the aggregator in its own goroutine. It also handles new aggregators
@@ -82,19 +112,16 @@ func (rp *AggregatorProcessor[V]) Stop(ctx context.Context) error {
 		return nil
 	default:
 		close(rp.stopping)
+		close(rp.newlyCreated)
 	}
 	rp.stopMu.Unlock()
 
 	eg := &errgroup.Group{}
-	rp.mu.RLock()
-	close(rp.newlyCreated)
-	defer rp.mu.RUnlock()
-	for _, res := range rp.a {
-		res := res
+	rp.provider.forEach(func(projectID string, val V) {
 		eg.Go(func() error {
-			return res.Stop(ctx)
+			return val.Stop(ctx)
 		})
-	}
+	})
 	return eg.Wait()
 }
 

@@ -19,7 +19,6 @@ package multitenant
 
 import (
 	"context"
-	"sync"
 
 	"github.com/elastic/apm-server/internal/multitenant/util"
 	"github.com/elastic/apm-server/internal/sourcemap"
@@ -27,21 +26,17 @@ import (
 )
 
 type SourcemapFetcher struct {
-	creator func(string) (sourcemap.Fetcher, error)
+	provider *provider[sourcemap.Fetcher]
 
 	cfgResolver    mtCfgResolver
 	clientResolver mtESClientResolver
-
-	mu sync.RWMutex
-	a  map[string]sourcemap.Fetcher
 }
 
 func NewSourcemapFetcher(
 	creator func(string) (sourcemap.Fetcher, error),
 ) *SourcemapFetcher {
 	return &SourcemapFetcher{
-		creator: creator,
-		a:       make(map[string]sourcemap.Fetcher),
+		provider: newProvider(creator),
 	}
 }
 
@@ -51,26 +46,9 @@ func (sf *SourcemapFetcher) Fetch(ctx context.Context, name, version, bundleFile
 		return nil, err
 	}
 
-	sf.mu.RLock()
-	fetcher, ok := sf.a[projectID]
-	sf.mu.RUnlock()
-	if ok {
-		return fetcher.Fetch(ctx, name, version, bundleFilePath)
-	}
-
-	sf.mu.Lock()
-	fetcher, ok = sf.a[projectID]
-	if ok {
-		sf.mu.Unlock()
-		return fetcher.Fetch(ctx, name, version, bundleFilePath)
-	}
-	fetcher, err = sf.creator(projectID)
+	res, _, err := sf.provider.get(projectID)
 	if err != nil {
-		sf.mu.Unlock()
 		return nil, err
 	}
-	sf.a[projectID] = fetcher
-	sf.mu.Unlock()
-
-	return fetcher.Fetch(ctx, name, version, bundleFilePath)
+	return res.Fetch(ctx, name, version, bundleFilePath)
 }

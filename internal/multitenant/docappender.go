@@ -19,18 +19,23 @@ package multitenant
 
 import (
 	"context"
+	"io"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dustin/go-humanize"
+	"github.com/elastic/apm-data/model"
 	"github.com/elastic/apm-server/internal/elasticsearch"
 	"github.com/elastic/apm-server/internal/multitenant/util"
 	"github.com/elastic/elastic-agent-libs/logp"
 	"github.com/elastic/go-docappender"
 	"github.com/pkg/errors"
+	"go.elastic.co/fastjson"
 	"go.uber.org/zap"
 )
 
+// DocappenderESConfig refers to the elasticsearch configuration requrired for docappender.
 type DocappenderESConfig struct {
 	*elasticsearch.Config `config:",inline"`
 	FlushBytes            string        `config:"flush_bytes"`
@@ -41,35 +46,69 @@ type DocappenderESConfig struct {
 	} `config:"autoscaling"`
 }
 
-// TODO: possible to refactor by utilizing base processor?
-type MTAppender struct {
-	cfgResolver    mtCfgResolver
-	clientResolver mtESClientResolver
-	memLimit       float64
-
-	logger *logp.Logger
+// Docappender refers to multitenant wrapper over the actual docappender.
+type Docappender struct {
+	provider *provider[*docappender.Appender]
+	pool     *sync.Pool
+	logger   *logp.Logger
 
 	mu sync.RWMutex
 	a  map[string]*docappender.Appender
 }
 
+// NewDocappender returns a multitenant docappender wrapper.
 func NewDocappender(
 	cfgResolver mtCfgResolver,
 	clientResolver mtESClientResolver,
 	memLimit float64,
 	logger *logp.Logger,
-) *MTAppender {
-	return &MTAppender{
-		cfgResolver:    cfgResolver,
-		clientResolver: clientResolver,
-		memLimit:       memLimit,
-		a:              make(map[string]*docappender.Appender),
-		logger:         logger,
+) *Docappender {
+	var pool sync.Pool
+	pool.New = func() any {
+		return &pooledReader{pool: &pool}
+	}
+	return &Docappender{
+		provider: newProvider(func(projectID string) (*docappender.Appender, error) {
+			cfg, err := cfgResolver(projectID)
+			if err != nil {
+				return nil, err
+			}
+			var flushBytes int
+			if cfg.FlushBytes != "" {
+				b, err := humanize.ParseBytes(cfg.FlushBytes)
+				if err != nil {
+					return nil, errors.Wrap(err, "failed to parse flush_bytes")
+				}
+				flushBytes = int(b)
+			}
+			client, err := clientResolver(cfg.Config)
+			if err != nil {
+				return nil, err
+			}
+			var scalingCfg docappender.ScalingConfig
+			if enabled := cfg.Scaling.Enabled; enabled != nil {
+				scalingCfg.Disabled = !*enabled
+			}
+			opts := docappender.Config{
+				CompressionLevel: cfg.CompressionLevel,
+				FlushBytes:       flushBytes,
+				FlushInterval:    cfg.FlushInterval,
+				MaxRequests:      cfg.MaxRequests,
+				Scaling:          scalingCfg,
+				Logger:           zap.New(logger.Core(), zap.WithCaller(true)),
+			}
+			opts = docappenderConfig(opts, memLimit)
+			return docappender.New(client, opts)
+		}),
+		pool:   &pool,
+		a:      make(map[string]*docappender.Appender),
+		logger: logger,
 	}
 }
 
-func (mt *MTAppender) Close(ctx context.Context) error {
-	for _, v := range mt.a {
+// Close closes all docappenders for all the project-IDs.
+func (a *Docappender) Close(ctx context.Context) error {
+	for _, v := range a.a {
 		select {
 		case <-ctx.Done():
 			return errors.Wrap(ctx.Err(), "failed to close all appenders")
@@ -80,63 +119,43 @@ func (mt *MTAppender) Close(ctx context.Context) error {
 	return nil
 }
 
-func (mt *MTAppender) Stats() docappender.Stats {
+// Stats returns aggregated stats for all docappenders.
+func (a *Docappender) Stats() docappender.Stats {
 	// TODO: Implement aggregated stats
 	return docappender.Stats{}
 }
 
-func (mt *MTAppender) GetWithContext(ctx context.Context) (*docappender.Appender, error) {
+// ProcessBatch processes the batch by resolving the project-ID and seleting the
+// appropriate appender.
+func (a *Docappender) ProcessBatch(ctx context.Context, b *model.Batch) error {
 	projectID, err := util.GetProjectIDFromContext(ctx)
 	if err != nil {
-		return nil, err
-	}
-	return mt.Get(projectID)
-}
-
-func (mt *MTAppender) Get(projectID string) (*docappender.Appender, error) {
-	mt.mu.RLock()
-	app, ok := mt.a[projectID]
-	mt.mu.RUnlock()
-	if ok {
-		return app, nil
+		return err
 	}
 
-	mt.mu.Lock()
-	defer mt.mu.Unlock()
-	app, ok = mt.a[projectID]
-	if ok {
-		return app, nil
-	}
-	cfg, err := mt.cfgResolver(projectID)
+	agg, _, err := a.provider.get(projectID)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var flushBytes int
-	if cfg.FlushBytes != "" {
-		b, err := humanize.ParseBytes(cfg.FlushBytes)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to parse flush_bytes")
+
+	for _, event := range *b {
+		r := a.pool.Get().(*pooledReader)
+		if err := event.MarshalFastJSON(&r.jsonw); err != nil {
+			r.reset()
+			return err
 		}
-		flushBytes = int(b)
+		r.indexBuilder.WriteString(event.DataStream.Type)
+		r.indexBuilder.WriteByte('-')
+		r.indexBuilder.WriteString(event.DataStream.Dataset)
+		r.indexBuilder.WriteByte('-')
+		r.indexBuilder.WriteString(event.DataStream.Namespace)
+		index := r.indexBuilder.String()
+		if err := agg.Add(ctx, index, r); err != nil {
+			r.reset()
+			return err
+		}
 	}
-	client, err := mt.clientResolver(cfg.Config)
-	if err != nil {
-		return nil, err
-	}
-	var scalingCfg docappender.ScalingConfig
-	if enabled := cfg.Scaling.Enabled; enabled != nil {
-		scalingCfg.Disabled = !*enabled
-	}
-	opts := docappender.Config{
-		CompressionLevel: cfg.CompressionLevel,
-		FlushBytes:       flushBytes,
-		FlushInterval:    cfg.FlushInterval,
-		MaxRequests:      cfg.MaxRequests,
-		Scaling:          scalingCfg,
-		Logger:           zap.New(mt.logger.Core(), zap.WithCaller(true)),
-	}
-	opts = docappenderConfig(opts, mt.memLimit)
-	return docappender.New(client, opts)
+	return nil
 }
 
 func docappenderConfig(opts docappender.Config, memLimit float64) docappender.Config {
@@ -158,4 +177,26 @@ func docappenderConfig(opts docappender.Config, memLimit float64) docappender.Co
 	}
 	opts.MaxRequests = maxRequests
 	return opts
+}
+
+type pooledReader struct {
+	pool         *sync.Pool
+	jsonw        fastjson.Writer
+	indexBuilder strings.Builder
+}
+
+func (r *pooledReader) Read(p []byte) (int, error) {
+	panic("should've called WriteTo")
+}
+
+func (r *pooledReader) WriteTo(w io.Writer) (int64, error) {
+	n, err := w.Write(r.jsonw.Bytes())
+	r.reset()
+	return int64(n), err
+}
+
+func (r *pooledReader) reset() {
+	r.jsonw.Reset()
+	r.indexBuilder.Reset()
+	r.pool.Put(r)
 }

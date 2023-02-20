@@ -1,5 +1,5 @@
 resources:
   - elasticsearch.yaml
   - kibana.yaml
-  - apm-server.yaml
+  # - apm-server.yaml
   - fleet-server.yaml
