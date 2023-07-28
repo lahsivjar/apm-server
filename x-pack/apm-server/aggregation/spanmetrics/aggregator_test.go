@@ -634,6 +634,103 @@ func TestAggregateTransactionDroppedSpansStats(t *testing.T) {
 		})))
 }
 
+func TestAggregateTransactionMultipleSameDroppedSpansStats(t *testing.T) {
+	batches := make(chan modelpb.Batch, 1)
+	agg, err := NewAggregator(AggregatorConfig{
+		BatchProcessor: makeChanBatchProcessor(batches),
+		Interval:       10 * time.Millisecond,
+		MaxGroups:      1000,
+	})
+	require.NoError(t, err)
+
+	tx := modelpb.APMEvent{
+		Agent: &modelpb.Agent{Name: "init"},
+		Service: &modelpb.Service{
+			Name: "init",
+		},
+		Event: &modelpb.Event{
+			Outcome:  "init",
+			Duration: durationpb.New(500 * time.Millisecond),
+		},
+		Transaction: &modelpb.Transaction{
+			Type:                "init",
+			RepresentativeCount: 0.5,
+			DroppedSpansStats: []*modelpb.DroppedSpanStats{
+				{
+					DestinationServiceResource: "init",
+					ServiceTargetName:          "init",
+					ServiceTargetType:          "init",
+					Outcome:                    "init",
+					Duration: &modelpb.AggregatedDuration{
+						Count: 1,
+						Sum:   durationpb.New(time.Second + time.Nanosecond),
+					},
+				},
+				{
+					DestinationServiceResource: "init",
+					ServiceTargetName:          "init",
+					ServiceTargetType:          "init",
+					Outcome:                    "init",
+					Duration: &modelpb.AggregatedDuration{
+						Count: 1,
+						Sum:   durationpb.New(time.Second + time.Nanosecond),
+					},
+				},
+				{
+					DestinationServiceResource: "init",
+					ServiceTargetName:          "init",
+					ServiceTargetType:          "init",
+					Outcome:                    "init",
+					Duration: &modelpb.AggregatedDuration{
+						Count: 1,
+						Sum:   durationpb.New(time.Second + time.Nanosecond),
+					},
+				},
+			},
+		},
+	}
+
+	err = agg.ProcessBatch(
+		context.Background(),
+		&modelpb.Batch{&tx})
+	require.NoError(t, err)
+
+	// Start the aggregator after processing to ensure metrics are aggregated deterministically.
+	go agg.Run()
+	defer agg.Stop(context.Background())
+
+	batch := expectBatch(t, batches)
+	metricsets := batchMetricsets(t, batch)
+
+	assert.Empty(t, cmp.Diff([]*modelpb.APMEvent{
+		{
+			Agent: &modelpb.Agent{Name: "init"},
+			Service: &modelpb.Service{
+				Name: "init",
+				Target: &modelpb.ServiceTarget{
+					Name: "init",
+					Type: "init",
+				},
+			},
+			Event:     &modelpb.Event{Outcome: "init"},
+			Metricset: &modelpb.Metricset{Name: "service_destination", Interval: "0s", DocCount: 2},
+			Span: &modelpb.Span{
+				DestinationService: &modelpb.DestinationService{
+					Resource: "init",
+					ResponseTime: &modelpb.AggregatedDuration{
+						Count: 2,
+						Sum:   durationpb.New(1500*time.Millisecond + 2*time.Nanosecond),
+					},
+				},
+			},
+		},
+	}, metricsets,
+		protocmp.Transform(),
+		cmpopts.SortSlices(func(e1 *modelpb.APMEvent, e2 *modelpb.APMEvent) bool {
+			return e1.Span.DestinationService.Resource < e2.Span.DestinationService.Resource
+		})))
+}
+
 func TestAggregateHalfCapacityNoSpanName(t *testing.T) {
 	batches := make(chan modelpb.Batch, 1)
 	agg, err := NewAggregator(AggregatorConfig{
